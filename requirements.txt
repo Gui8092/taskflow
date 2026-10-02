@@ -1,0 +1,10 @@
+# taskflow — dependências
+#
+# Todo o resto usa apenas a biblioteca padrão do Python 3.11+.
+# Broker, persistência, event bus, pool de workers, cron, DLQ, CLI e
+# dashboard são implementados do zero neste projeto (sem Celery/Redis/RQ/Dramatiq).
+
+fastapi>=0.110
+uvicorn>=0.27
+pytest>=8.0
+pytest-asyncio>=0.23
