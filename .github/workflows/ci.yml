@@ -57,7 +57,11 @@ jobs:
   smoke:
     name: smoke da CLI
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    env:
+      # O worker precisa consumir as duas filas usadas pelo smoke, senão --drain
+      # espera para sempre pela task que está na fila 'demo'.
+      TASKFLOW_QUEUES: "default,demo"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,7 +77,7 @@ jobs:
           python -m taskflow.cli --modules tests.demo_tasks tasks
           python -m taskflow.cli --modules tests.demo_tasks submit demo.ok --args '["ci"]'
           python -m taskflow.cli --modules tests.demo_tasks submit demo.flaky --args "[2]" --queue demo --max-retries 5
-          python -m taskflow.cli --modules tests.demo_tasks worker -c 2 --drain
+          python -m taskflow.cli --modules tests.demo_tasks worker -c 2 --drain --max-idle 15
           python -m taskflow.cli status
           python -m taskflow.cli cron next "*/5 * * * *" --count 2
 
@@ -81,6 +85,33 @@ jobs:
         run: |
           set -euo pipefail
           python -m taskflow.cli --modules tests.demo_tasks submit demo.boom --queue demo --max-retries 0
-          python -m taskflow.cli --modules tests.demo_tasks worker -c 1 --queue demo --drain
+          python -m taskflow.cli --modules tests.demo_tasks worker -c 1 --queue demo --drain --max-idle 15
           python -m taskflow.cli dlq list
           test -f .taskflow/journal.jsonl
+
+      - name: Conferir que a task que falhou de vez foi para a DLQ e pode voltar
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import asyncio, os, sys
+          sys.path.insert(0, os.getcwd())
+          from taskflow.core.broker import Broker
+          from taskflow.core.config import Config
+          from taskflow.core.registry import build_registry
+          from taskflow.worker.deadletter import DeadLetterQueue
+
+          async def main() -> None:
+              registro = build_registry(["tests.demo_tasks"])
+              broker = Broker(Config(queues=("default", "demo")), registro)
+              await broker.start()
+              dlq = DeadLetterQueue(broker)
+              mortos = dlq.list()
+              assert mortos, "esperava ao menos uma task na DLQ"
+              reenfileirada = await dlq.requeue(mortos[0].id)
+              assert reenfileirada.state.value == "PENDING", reenfileirada.state
+              assert reenfileirada.attempts == 0, reenfileirada.attempts
+              await broker.stop()
+              print("OK: DLQ com", len(mortos), "task(s) e requeue funcionando")
+
+          asyncio.run(main())
+          PY
