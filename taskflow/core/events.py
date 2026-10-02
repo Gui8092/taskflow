@@ -29,6 +29,7 @@ class EventType(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     DEAD = "dead"
+    CANCELLED = "cancelled"
 
     def __str__(self) -> str:
         """Devolve o valor textual do evento."""

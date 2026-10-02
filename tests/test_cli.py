@@ -351,8 +351,141 @@ async def test_snapshot_do_dashboard_contem_o_que_a_ui_precisa(
     assert json.dumps(snapshot)  # serializável para o WebSocket
 
 
+def test_cancel_por_id_e_por_prefixo(data_dir: Path) -> None:
+    """``cancel`` cancela a task por id completo ou por prefixo."""
+    _, saida = rodar(
+        ["--data-dir", str(data_dir), "--modules", "demo_tasks", "submit", "demo.ok"]
+    )
+    task_id = saida.split("id        ")[1].split()[0]
+
+    codigo, saida_cancel = rodar(
+        ["--data-dir", str(data_dir), "cancel", task_id[:8], "--reason", "desnecessaria"]
+    )
+
+    assert codigo == EXIT_OK
+    assert "task cancelada" in saida_cancel
+    assert "desnecessaria" in saida_cancel
+
+    _, status = rodar(["--data-dir", str(data_dir), "status", "--json"])
+    assert json.loads(status)[0]["state"] == TaskState.CANCELLED.value
+
+
+def test_cancel_de_task_inexistente(data_dir: Path) -> None:
+    """Id desconhecido sai com código de uso."""
+    erros = io.StringIO()
+    codigo = main(
+        [*BASE, "--data-dir", str(data_dir), "cancel", "nao-existe"],
+        out=io.StringIO(),
+        err=erros,
+    )
+
+    assert codigo == EXIT_USAGE
+    assert "task não encontrada" in erros.getvalue()
+
+
+def test_metrics_em_texto_prometheus(data_dir: Path) -> None:
+    """``metrics`` imprime o formato de texto do Prometheus."""
+    rodar(["--data-dir", str(data_dir), "--modules", "demo_tasks", "submit", "demo.ok"])
+
+    codigo, saida = rodar(["--data-dir", str(data_dir), "metrics"])
+
+    assert codigo == EXIT_OK
+    assert "# HELP taskflow_tasks_total" in saida
+    assert "# TYPE taskflow_ready gauge" in saida
+    assert "taskflow_ready 1" in saida
+    assert 'taskflow_tasks_total{queue="default",state="pending"} 1' in saida
+
+
+def test_metrics_em_json(data_dir: Path) -> None:
+    """``metrics --json`` devolve as mesmas contagens em JSON."""
+    rodar(["--data-dir", str(data_dir), "--modules", "demo_tasks", "submit", "demo.ok"])
+
+    codigo, saida = rodar(["--data-dir", str(data_dir), "metrics", "--json"])
+
+    assert codigo == EXIT_OK
+    payload = json.loads(saida)
+    assert payload["ready"] == 1
+    assert payload["queues"][0]["queue"] == "default"
+
+
+def test_scheduler_por_intervalo_com_max_runtime(data_dir: Path) -> None:
+    """``scheduler --interval`` dispara periodicamente e respeita ``--max-runtime``."""
+    codigo, saida = rodar(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--modules",
+            "demo_tasks",
+            "scheduler",
+            "demo.ok",
+            "--interval",
+            "1",
+            "--workers",
+            "1",
+            "--max-runtime",
+            "2.5",
+        ]
+    )
+
+    assert codigo == EXIT_OK
+    assert "scheduler" in saida
+    assert "a cada 1s" in saida
+    assert "resumo:" in saida
+
+    disparos = int(saida.split("resumo: ")[1].split()[0])
+    assert disparos >= 1
+    assert (data_dir / "journal.jsonl").exists()
+
+
+def test_scheduler_sem_workers_avisa_sobre_a_trava(data_dir: Path) -> None:
+    """Sem worker embutido, o agendador avisa que segura a trava de escrita."""
+    codigo, saida = rodar(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--modules",
+            "demo_tasks",
+            "scheduler",
+            "demo.ok",
+            "--interval",
+            "5",
+            "--max-runtime",
+            "0",
+        ]
+    )
+
+    assert codigo == EXIT_OK
+    assert "trava de escrita" in saida
+    assert "nenhum (só enfileira)" in saida
+
+
+def test_scheduler_exige_cron_ou_interval(data_dir: Path) -> None:
+    """Informar os dois (ou nenhum) é erro de uso."""
+    erros = io.StringIO()
+    codigo = main(
+        [
+            *BASE,
+            "--data-dir",
+            str(data_dir),
+            "--modules",
+            "demo_tasks",
+            "scheduler",
+            "demo.ok",
+            "--cron",
+            "* * * * *",
+            "--interval",
+            "10",
+        ],
+        out=io.StringIO(),
+        err=erros,
+    )
+
+    assert codigo == EXIT_USAGE
+    assert "--cron" in erros.getvalue()
+
+
 def test_create_app_expoe_as_rotas_esperadas(config: Config, registry: TaskRegistry) -> None:
-    """A aplicação do dashboard declara as rotas de HTML, API e WebSocket."""
+    """A aplicação do dashboard declara as rotas de HTML, API, métricas e WebSocket."""
     app = create_app(config=config, registry=registry, write=False)
     rotas = {getattr(rota, "path", "") for rota in app.routes}
 
@@ -361,5 +494,7 @@ def test_create_app_expoe_as_rotas_esperadas(config: Config, registry: TaskRegis
     assert "/api/tasks" in rotas
     assert "/api/dlq" in rotas
     assert "/api/dlq/{task_id}/requeue" in rotas
+    assert "/api/tasks/{task_id}/cancel" in rotas
+    assert "/metrics" in rotas
     assert "/health" in rotas
     assert "/ws" in rotas

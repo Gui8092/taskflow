@@ -184,11 +184,20 @@ class QueueStats:
     succeeded: int
     failed: int
     dead: int
+    cancelled: int
 
     @property
     def total(self) -> int:
         """Total de tasks conhecidas desta fila."""
-        return self.pending + self.retrying + self.running + self.succeeded + self.failed + self.dead
+        return (
+            self.pending
+            + self.retrying
+            + self.running
+            + self.succeeded
+            + self.failed
+            + self.dead
+            + self.cancelled
+        )
 
     @property
     def queued(self) -> int:
@@ -205,6 +214,7 @@ class QueueStats:
             "succeeded": self.succeeded,
             "failed": self.failed,
             "dead": self.dead,
+            "cancelled": self.cancelled,
             "queued": self.queued,
             "total": self.total,
         }
@@ -1173,6 +1183,59 @@ class Broker:
         )
         return task
 
+    async def cancel(self, task_id: str, *, reason: str | None = None) -> Task:
+        """Cancela uma task que ainda está na fila.
+
+        Só é possível cancelar enquanto a task não começou a executar: uma task em
+        ``RUNNING`` já está dentro da função do usuário, e não existe cancelamento
+        cooperativo — nesse caso levanta :class:`BrokerError` com o motivo.
+
+        Args:
+            task_id: Id da task.
+            reason: Motivo registrado na task e publicado no evento.
+
+        Returns:
+            A task cancelada.
+
+        Raises:
+            TaskNotFoundError: Se a task não existir.
+            BrokerError: Se a task já estiver em execução ou for terminal.
+        """
+        self._require_writable("cancel")
+        task = self.require(task_id)
+        if task.state not in QUEUEABLE_STATES:
+            raise BrokerError(
+                f"não é possível cancelar {task.short_id} no estado {task.state.value}; "
+                "só tasks pendentes ou aguardando retry podem ser canceladas"
+            )
+        now = time.time()
+        task.set_state(TaskState.CANCELLED, strict=True)
+        task.finished_at = now
+        task.eta = None
+        task.lease = None
+        task.last_error = reason
+        self._untrack(task_id)
+        self._append("cancel", task)
+        await self.events.publish(
+            make_event(
+                EventType.CANCELLED,
+                task,
+                reason=reason,
+                attempts=task.attempts,
+                priority=task.priority,
+            )
+        )
+        LOGGER.info(
+            "task cancelada",
+            extra={
+                "task_id": task.short_id,
+                "task_name": task.name,
+                "queue": task.queue,
+                "motivo": reason,
+            },
+        )
+        return task
+
     async def remove(self, task_id: str) -> bool:
         """Remove uma task do ledger (purge). Devolve ``True`` se ela existia."""
         self._require_writable("remove")
@@ -1256,6 +1319,7 @@ class Broker:
                 succeeded=buckets[name][TaskState.SUCCESS.value],
                 failed=buckets[name][TaskState.FAILED.value],
                 dead=buckets[name][TaskState.DEAD.value],
+                cancelled=buckets[name][TaskState.CANCELLED.value],
             )
             for name in sorted(buckets)
         )

@@ -34,7 +34,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Final
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from taskflow.core.broker import (
     Broker,
@@ -44,6 +44,7 @@ from taskflow.core.broker import (
     TaskNotFoundError,
 )
 from taskflow.core.config import Config
+from taskflow.core.metrics import METRICS_CONTENT_TYPE, build_metrics_text
 from taskflow.core.registry import TaskRegistry
 from taskflow.core.states import TaskState
 from taskflow.core.task import Task, TaskFilter
@@ -271,6 +272,26 @@ def create_app(
             "read_only": active.read_only,
         }
 
+    @application.get("/metrics", response_class=PlainTextResponse)
+    async def metrics() -> PlainTextResponse:
+        """Métricas no formato de texto do Prometheus (para scraping)."""
+        active: Broker = application.state.broker
+        return PlainTextResponse(build_metrics_text(active), media_type=METRICS_CONTENT_TYPE)
+
+    @application.post("/api/tasks/{task_id}/cancel")
+    async def api_cancel(task_id: str, reason: str | None = None) -> JSONResponse:
+        """Cancela uma task que ainda está na fila (usado pela interface)."""
+        active: Broker = application.state.broker
+        try:
+            task: Task = await active.cancel(task_id, reason=reason)
+        except ReadOnlyBrokerError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except TaskNotFoundError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        except BrokerError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, "task": task.summary()})
+
     @application.post("/api/dlq/{task_id}/requeue")
     async def api_requeue(task_id: str, queue: str | None = None) -> JSONResponse:
         """Reenfileira uma task da DLQ (botão da interface)."""
@@ -374,6 +395,7 @@ _DASHBOARD_HTML: Final[str] = """<!doctype html>
     --bad: #f87171; --bad-bg: rgba(248, 113, 113, .12); --bad-border: rgba(248, 113, 113, .3);
     --info: #a78bfa; --info-bg: rgba(167, 139, 250, .12); --info-border: rgba(167, 139, 250, .3);
     --muted: #9ca3af; --muted-bg: rgba(255, 255, 255, .07); --muted-border: rgba(255, 255, 255, .12);
+    --cyan: #22d3ee; --cyan-bg: rgba(34, 211, 238, .12); --cyan-border: rgba(34, 211, 238, .3);
     --shadow: none;
   }
 }
@@ -473,6 +495,7 @@ td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-spa
   font-size: 11px; font-weight: 600; letter-spacing: .02em; border: 1px solid transparent; white-space: nowrap;
 }
 .badge.PENDING { color: var(--muted); background: var(--muted-bg); border-color: var(--muted-border); }
+.badge.CANCELLED { color: var(--cyan); background: var(--cyan-bg); border-color: var(--cyan-border); }
 .badge.RUNNING { color: var(--info); background: var(--info-bg); border-color: var(--info-border); }
 .badge.RETRY { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-border); }
 .badge.SUCCESS { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
@@ -554,6 +577,7 @@ td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-spa
           <option value="SUCCESS">sucesso</option>
           <option value="FAILED">falha permanente</option>
           <option value="DEAD">dead letter</option>
+          <option value="CANCELLED">cancelada</option>
         </select>
         <select id="filter-queue" aria-label="Filtrar por fila"><option value="">todas as filas</option></select>
         <input type="search" id="filter-text" placeholder="buscar por nome ou id" aria-label="Buscar task">
@@ -701,7 +725,8 @@ td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-spa
       ["RUNNING", "executando", stats.in_flight],
       ["SUCCESS", "sucesso", stats.succeeded],
       ["FAILED", "permanentes", stats.failed],
-      ["DEAD", "dead letter", stats.queues.reduce(function (acc, q) { return acc + q.dead; }, 0)]
+      ["DEAD", "dead letter", stats.queues.reduce(function (acc, q) { return acc + q.dead; }, 0)],
+      ["CANCELLED", "canceladas", stats.queues.reduce(function (acc, q) { return acc + q.cancelled; }, 0)]
     ];
     el("legend").innerHTML = legend.map(function (item) {
       return '<div class="legend-row">' + badge(item[0]) + "<span>" + escapeHtml(item[1])
@@ -761,7 +786,7 @@ td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-spa
   function renderEvents(data) {
     var rows = (data.events || []).slice().reverse();
     el("rows-events").innerHTML = rows.map(function (event) {
-      var tone = { enqueued: "PENDING", started: "RUNNING", success: "SUCCESS", failed: "FAILED", dead: "DEAD" };
+      var tone = { enqueued: "PENDING", started: "RUNNING", success: "SUCCESS", failed: "FAILED", dead: "DEAD", cancelled: "CANCELLED" };
       return '<div class="event"><span class="t mono">' + formatTime(event.timestamp) + "</span>"
         + '<span class="tag">' + badge(tone[event.type] || "PENDING") + "</span>"
         + '<span class="msg">' + escapeHtml(event.name) + " "
@@ -778,6 +803,7 @@ td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-spa
     }
     if (event.type === "failed") { return shorten(payload.error, 80); }
     if (event.type === "dead") { return shorten(payload.error, 80); }
+    if (event.type === "cancelled") { return "motivo: " + (payload.reason || "não informado"); }
     if (payload.requeued) { return "reenfileirada (veio de " + payload.previous_state + ")"; }
     if (payload.recovered) { return "recuperada após worker morto"; }
     return "prio " + payload.priority;

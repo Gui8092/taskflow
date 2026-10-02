@@ -4,6 +4,39 @@ Todas as mudanças relevantes deste projeto são registradas aqui.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e o
 versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 
+## [Não publicado]
+
+### Adicionado
+
+- **Cancelamento de task:** novo estado terminal `CANCELLED`, alcançável a partir de
+  `PENDING` e `RETRY` via `Broker.cancel(id, reason=...)`, com evento `cancelled`
+  no bus, contagem por fila e badge próprio na interface. Cancelamento é decisão,
+  não falha: a task não entra na dead letter queue e pode voltar com `requeue`.
+  Task em `RUNNING` não pode ser cancelada e o erro explica que não há
+  cancelamento cooperativo.
+- **Métricas no formato Prometheus:** novo `taskflow/core/metrics.py`, exposto em
+  `GET /metrics` (content type `text/plain; version=0.0.4`) e no comando
+  `taskflow.cli metrics`, que lê o broker em modo somente-leitura (sem tomar a
+  trava de escrita). Séries: `taskflow_tasks_total{queue,state}`, `taskflow_ready`,
+  `taskflow_queued`, `taskflow_in_flight`, `taskflow_dead_lettered`,
+  `taskflow_succeeded`, `taskflow_cancelled`, `taskflow_uptime_seconds` e
+  `taskflow_journal_lines`.
+- **Agendamento por intervalo:** `Schedule` agora aceita `cron` **ou** `interval`,
+  e `Scheduler.add_interval(task, segundos, ...)` dispara abaixo da granularidade
+  de 1 minuto do cron, sem acumular atraso quando o processo fica parado.
+- **Novos comandos de CLI:** `cancel`, `metrics` e `scheduler` (roda o agendador
+  enfileirando tasks, com `--workers N` para consumir no mesmo processo).
+- **Novo endpoint `POST /api/tasks/{id}/cancel`** para a interface web.
+- Testes: `tests/test_features.py` (19 casos) e 7 casos novos em `test_cli.py`.
+  Total de 210 testes, todos passando.
+
+### Documentado
+
+- Limitações agora explícitas no README: escrita do journal em I/O bloqueante no
+  event loop, ausência de encadeamento de tasks (`group`/`chord`), cancelamento
+  apenas antes da execução e ausência de teste de integração HTTP/WebSocket
+  (bloqueada pela restrição de dependências: `httpx` está fora da allowlist).
+
 ## [1.0.0] — 2026-10-02
 
 Primeira versão estável: fila de tarefas distribuída completa, com broker,

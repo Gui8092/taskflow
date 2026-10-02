@@ -7,12 +7,14 @@ O ciclo de vida implementado pelo broker é::
        │          │  └──▶ RETRY ──▶ (nova tentativa) ──▶ RUNNING
        │          │
        └── reclaim └──▶ FAILED  (falha permanente, sem retry possível)
+       │  cancel()   └──▶ CANCELLED (cancelada por quem enfileirou)
                      └──▶ DEAD    (esgotou max_retries; mora na DLQ)
 
 ``FAILED`` e ``DEAD`` são ambos terminais e vivem na dead letter queue: o
 primeiro representa falha permanente detectada na hora (task desconhecida,
-resultado não serializável, cancelamento) e o segundo representa esgotamento
-do orçamento de retries.
+resultado não serializável) e o segundo representa esgotamento do orçamento de
+retries. ``CANCELLED`` também é terminal, mas é uma decisão explícita de quem
+enfileirou — por isso **não** vai para a dead letter queue.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class TaskState(str, Enum):
     FAILED = "FAILED"
     RETRY = "RETRY"
     DEAD = "DEAD"
+    CANCELLED = "CANCELLED"
 
     def __str__(self) -> str:
         """Devolve o valor textual do estado (útil em logs e na UI)."""
@@ -50,6 +53,11 @@ class TaskState(str, Enum):
         """``True`` para os estados que representam falha."""
         return self in FAILURE_STATES
 
+    @property
+    def is_cancelled(self) -> bool:
+        """``True`` apenas para tasks canceladas."""
+        return self is TaskState.CANCELLED
+
     @classmethod
     def coerce(cls, value: TaskState | str) -> TaskState:
         """Converte texto em :class:`TaskState`, aceitando maiúsculas/minúsculas."""
@@ -68,7 +76,7 @@ PENDING_STATES: Final[frozenset[TaskState]] = frozenset({TaskState.PENDING, Task
 
 #: Estados finais: a task não volta mais para a fila por conta própria.
 TERMINAL_STATES: Final[frozenset[TaskState]] = frozenset(
-    {TaskState.SUCCESS, TaskState.FAILED, TaskState.DEAD}
+    {TaskState.SUCCESS, TaskState.FAILED, TaskState.DEAD, TaskState.CANCELLED}
 )
 
 #: Estados de falha (todos terminais e presentes na dead letter queue).
@@ -81,7 +89,7 @@ ACTIVE_STATES: Final[frozenset[TaskState]] = PENDING_STATES | {TaskState.RUNNING
 #: requeue explícito da DLQ (``FAILED``/``DEAD`` → ``PENDING``).
 VALID_TRANSITIONS: Final[Mapping[TaskState, frozenset[TaskState]]] = {
     TaskState.PENDING: frozenset(
-        {TaskState.RUNNING, TaskState.RETRY, TaskState.FAILED, TaskState.DEAD}
+        {TaskState.RUNNING, TaskState.RETRY, TaskState.FAILED, TaskState.DEAD, TaskState.CANCELLED}
     ),
     TaskState.RUNNING: frozenset(
         {
@@ -93,11 +101,12 @@ VALID_TRANSITIONS: Final[Mapping[TaskState, frozenset[TaskState]]] = {
         }
     ),
     TaskState.RETRY: frozenset(
-        {TaskState.RUNNING, TaskState.FAILED, TaskState.DEAD, TaskState.PENDING}
+        {TaskState.RUNNING, TaskState.FAILED, TaskState.DEAD, TaskState.PENDING, TaskState.CANCELLED}
     ),
     TaskState.SUCCESS: frozenset(),
     TaskState.FAILED: frozenset({TaskState.PENDING}),
     TaskState.DEAD: frozenset({TaskState.PENDING}),
+    TaskState.CANCELLED: frozenset({TaskState.PENDING}),
 }
 
 _LABELS: Final[Mapping[TaskState, str]] = {
@@ -107,6 +116,7 @@ _LABELS: Final[Mapping[TaskState, str]] = {
     TaskState.FAILED: "falha permanente",
     TaskState.RETRY: "aguardando retry",
     TaskState.DEAD: "dead letter",
+    TaskState.CANCELLED: "cancelada",
 }
 
 

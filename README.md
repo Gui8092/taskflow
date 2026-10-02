@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Licença](https://img.shields.io/badge/licença-MIT-green)
-![Testes](https://img.shields.io/badge/testes-184%20passing-2ea043)
+![Testes](https://img.shields.io/badge/testes-210%20passing-2ea043)
 ![Dependências](https://img.shields.io/badge/dependências-fastapi·uvicorn·pytest-blueviolet)
 
 Fila de tarefas distribuída — um "mini-Celery" escrito do zero, em Python 3.11+,
@@ -22,7 +22,7 @@ taskflow/
 ├── taskflow/scheduler   parser de cron e loop de disparo periódico
 ├── taskflow/cli         submit · status · tasks · monitor · worker · dashboard · dlq · cron
 ├── taskflow/dashboard   FastAPI + WebSocket + página única com JS embutido
-└── tests                184 testes cobrindo broker, worker, retry/DLQ, cron, CLI, disco e infraestrutura
+└── tests                210 testes cobrindo broker, worker, retry/DLQ, cron, CLI, disco e infraestrutura
 ```
 
 ## Instalação
@@ -127,9 +127,12 @@ python -m taskflow.cli <comando> [--data-dir DIR] [--modules mod1,mod2] [--no-co
 submit     enfileira uma task registrada
 status     detalhe de uma task (por id ou prefixo) ou resumo do broker
 tasks      lista as tasks registradas no processo
-monitor    visão ao vivo no terminal (ANSI)          [--once] [--interval] [--rows]
-worker     sobe o pool de workers                    [-c N] [--queue F] [--drain] [--max-idle S]
-dashboard  sobe a interface web                      [--host] [--port] [--workers N]
+cancel     cancela uma task que ainda está na fila        <id> [--reason TXT]
+metrics    métricas no formato de texto do Prometheus     [--json]
+scheduler  enfileira uma task periodicamente             NAME (--cron EXPR | --interval S)
+monitor    visão ao vivo no terminal (ANSI)              [--once] [--interval] [--rows]
+worker     sobe o pool de workers                        [-c N] [--queue F] [--drain] [--max-idle S]
+dashboard  sobe a interface web                          [--host] [--port] [--workers N]
 dlq        list | requeue [id] | purge
 cron       next <expr> | check <expr>
 ```
@@ -142,7 +145,20 @@ python -m taskflow.cli --modules tests.demo_tasks worker -c 2 --queue demo --dra
 python -m taskflow.cli status --queue demo
 python -m taskflow.cli dlq list
 python -m taskflow.cli cron next "*/5 * * * *" --count 5
+
+# cancelar uma task pendente
+python -m taskflow.cli cancel <id> --reason "mudei de ideia"
+
+# métricas para o Prometheus (o mesmo texto de GET /metrics)
+python -m taskflow.cli metrics
+
+# disparar uma task a cada 30s, com worker no mesmo processo
+python -m taskflow.cli --modules tests.demo_tasks scheduler demo.ok --interval 30 --workers 2
 ```
+
+> O `scheduler` precisa escrever no broker, então **segura a trava de escrita**
+> enquanto roda. Use `--workers N` para consumir as tasks no mesmo processo, ou
+> mantenha um worker em outro processo com `--no-lock`.
 
 ### `monitor` (TUI ao vivo)
 
@@ -181,7 +197,51 @@ com um clique — que zera as tentativas e dá um orçamento novo.</sub>
   responsivo e com `prefers-reduced-motion`
 
 Endpoints: `GET /`, `GET /api/state`, `GET /api/tasks`, `GET /api/dlq`,
-`POST /api/dlq/{id}/requeue`, `GET /health`, `WS /ws`.
+`POST /api/dlq/{id}/requeue`, `POST /api/tasks/{id}/cancel`, `GET /metrics`,
+`GET /health`, `WS /ws`.
+
+### Métricas (Prometheus)
+
+`GET /metrics` e o comando `metrics` expõem o mesmo texto, em formato de
+exposição do Prometheus (`text/plain; version=0.0.4`):
+
+```
+# HELP taskflow_tasks_total Tasks do ledger por fila e por estado.
+# TYPE taskflow_tasks_total gauge
+taskflow_tasks_total{queue="default",state="pending"} 12
+taskflow_tasks_total{queue="alta",state="running"} 2
+...
+taskflow_ready 14
+taskflow_in_flight 2
+taskflow_dead_lettered 3
+taskflow_cancelled 1
+taskflow_uptime_seconds 128.402
+taskflow_journal_lines 512
+```
+
+O comando `metrics` lê o broker em modo somente-leitura, então dá para consultar
+as métricas de outro processo **sem** tomar a trava de escrita. Para configurar
+o scrape no Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: taskflow
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+    metrics_path: /metrics
+```
+
+### Cancelamento de task
+
+`broker.cancel(id, reason=...)` (ou `taskflow.cli cancel <id>`) cancela uma task
+que ainda está na fila — tanto `PENDING` quanto aguardando retry — movendo-a para
+o estado terminal `CANCELLED`, com evento `cancelled` no bus. Ela **não** vai para
+a dead letter queue (cancelamento é decisão, não falha) e pode voltar à fila com
+`requeue`, que zera as tentativas.
+
+Task em `RUNNING` não pode ser cancelada: ela já está dentro da função do
+usuário e não existe cancelamento cooperativo nesse desenho — o erro diz isso
+explicitamente em vez de fingir que cancelou.
 
 Por padrão o dashboard **apenas observa**; `--workers N` sobe um pool embutido.
 Se outro processo já estiver segurando a trava, o dashboard cai para
@@ -199,6 +259,19 @@ agendador = Scheduler(broker, broker.config)
 agendador.add_task(meu_registro.get("relatorio"), "0 9 * * 1-5", "pdf")
 await agendador.start()
 ```
+
+### Intervalos menores que um minuto
+
+A expressão cron tem granularidade de 1 minuto. Para disparos mais frequentes,
+use `add_interval` — a mesma task, a mesma interface:
+
+```python
+agendador.add_interval("ping", 30)          # a cada 30 segundos
+agendador.add_interval("relatorio", 90, "pdf")  # a cada 90s, com argumentos
+```
+
+Assim como no cron, o agendador **não faz catch-up**: se o processo ficou 10
+minutos parado, dispara uma vez, não dez.
 
 Sintaxe aceita em cada um dos 5 campos: `*`, `*/n`, `a`, `a-b`, `a-b/n` e listas
 (`0,30`). Mês aceita `jan..dez`, dia da semana `dom..sab` (e `7` = domingo).
@@ -268,7 +341,7 @@ async def main() -> None:
 ## Testes
 
 ```bash
-python -m pytest -q            # 184 testes
+python -m pytest -q            # 210 testes
 python -m pytest tests/test_retry_dlq.py -v
 ```
 
@@ -280,9 +353,10 @@ Cobertura por arquivo:
 | `test_worker.py` | 12 | end-to-end sync/async, ordem dos eventos, timeout, não-duplicação, resultado não serializável, heartbeat |
 | `test_retry_dlq.py` | 15 | backoff/jitter, 2 falhas → sucesso na 3ª, esgotamento de retries, DLQ, requeue, purge |
 | `test_scheduler.py` | 49 | 14 expressões válidas, 17 inválidas, `matches`, `next_after` com rollover, loop sem catch-up |
-| `test_cli.py` | 21 | submit, status, tasks, monitor, worker `--drain`, dlq, cron, HTML/snapshot do dashboard |
+| `test_cli.py` | 28 | submit, status, tasks, cancel, metrics, scheduler, monitor, worker `--drain`, dlq, cron, HTML/snapshot do dashboard |
 | `test_persistence.py` | 11 | restart, resultado em disco, DLQ, task `RUNNING`, lease vencida, compaction, linha truncada, leitor concorrente |
 | `test_core_infra.py` | 59 | config via env e validação, transições de estado, event bus (assistente assíncrono, `wait_for`, histórico), renovação de lease, `fsync`, traceback no resultado |
+| `test_features.py` | 19 | cancelamento (incluindo após restart), métricas Prometheus, agendamento por intervalo |
 
 ## Integração contínua
 
@@ -321,9 +395,10 @@ pull request na `main`:
 10. **Arquivos fora da árvore pedida, e por quê:**
     `taskflow/cli/__main__.py` (necessário para `python -m taskflow.cli`, item 7 do
     enunciado), `pytest.ini` (modo asyncio), `tests/conftest.py` (fixtures
-    isoladas), `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI) e
-    `tests/test_core_infra.py` (configuração, estados e event bus, que os demais
-    arquivos de teste só exercitam de passagem).
+    isoladas), `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI),
+    `tests/test_core_infra.py` (configuração, estados e event bus) e
+    `tests/test_features.py` (cancelamento, métricas e agendamento por intervalo),
+    que os arquivos originais de teste não cobriam.
 11. **O dashboard escreve CSS à mão**, em vez de reaproveitar classes utilitárias de
     um framework: a página precisa funcionar sem CDN e sem etapa de build.
 
@@ -352,13 +427,26 @@ python -m taskflow.cli status --queue demo
 
 ## Limitações conhecidas
 
-- Um processo escritor por `data_dir` (trava de escrita).
+- Um processo escritor por `data_dir` (trava de escrita). Um processo que fica
+  rodando e escrevendo — como o `scheduler` ou o `worker` — segura a trava
+  enquanto estiver ativo.
 - Lease vencida é detectada por **varredura periódica**, não por consenso: há uma
   janela entre a queda do worker e o recolhimento da task.
 - A compaction mantém até `TASKFLOW_LEDGER_LIMIT` tasks terminais — o ledger é
   limitado por configuração, não ilimitado.
 - Sem serialização de result sets em streaming: o retorno da task é serializado
   inteiro em JSON.
+- **Task em execução não pode ser cancelada** (não há cancelamento cooperativo);
+  só é possível cancelar o que ainda está na fila.
+- **O journal é escrito em I/O bloqueante dentro do event loop.** É irrelevante na
+  demo e em cargas pequenas, mas uma implementação de alta vazão usaria uma
+  thread de escrita dedicada.
+- **Sem encadeamento de tasks** (`group`/`chord`): não há " rode B quando A
+  terminar" nem "agende N tasks de uma vez". Dá para fazer com a biblioteca
+  chamando `submit` dentro da própria task.
+- O dashboard não tem teste de integração HTTP/WebSocket automatizado: `httpx`
+  está fora da lista de dependências permitidas, então as rotas são cobertas por
+  testes das funções puras e verificadas manualmente.
 
 ## Licença
 

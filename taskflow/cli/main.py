@@ -36,11 +36,13 @@ from typing import Any, Final, Sequence, TextIO
 from taskflow.core.broker import Broker, BrokerError, BrokerLockedError
 from taskflow.core.config import Config, ConfigError, setup_logging
 from taskflow.core.events import Event, EventType
+from taskflow.core.metrics import build_metrics_text
 from taskflow.core.registry import RegistryError, TaskRegistry, build_registry
 from taskflow.core.serialization import SerializationError
 from taskflow.core.states import TaskState, describe_state
 from taskflow.core.task import Task, TaskFilter
 from taskflow.scheduler.cron import CronError, CronExpression
+from taskflow.scheduler.scheduler import Scheduler
 from taskflow.worker.deadletter import DeadLetterQueue
 from taskflow.worker.pool import WorkerPool, worker_queues
 
@@ -59,6 +61,7 @@ _STATE_STYLES: Final[dict[TaskState, tuple[str, str]]] = {
     TaskState.RETRY: ("\033[33m", "amarelo"),
     TaskState.FAILED: ("\033[31m", "vermelho"),
     TaskState.DEAD: ("\033[31;1m", "vermelho forte"),
+    TaskState.CANCELLED: ("\033[36m", "ciano"),
 }
 
 _RESET: Final[str] = "\033[0m"
@@ -369,6 +372,37 @@ def build_parser() -> argparse.ArgumentParser:
     tasks_parser = subparsers.add_parser("tasks", help="lista as tasks registradas")
     tasks_parser.add_argument("--json", action="store_true", help="saída em JSON")
 
+    cancel = subparsers.add_parser("cancel", help="cancela uma task que ainda está na fila")
+    cancel.add_argument("id", help="id (ou prefixo) da task")
+    cancel.add_argument("--reason", help="motivo registrado na task")
+
+    metrics = subparsers.add_parser(
+        "metrics", help="métricas no formato de texto do Prometheus"
+    )
+    metrics.add_argument("--json", action="store_true", help="saída em JSON em vez de texto")
+
+    scheduler = subparsers.add_parser(
+        "scheduler", help="roda o agendador periódico enfileirando tasks"
+    )
+    scheduler.add_argument("name", help="nome lógico da task a agendar")
+    scheduler.add_argument("--cron", help="expressão cron (ex.: '*/5 * * * *')")
+    scheduler.add_argument(
+        "--interval", type=float, help="dispara a cada N segundos (permite menos de 1 minuto)"
+    )
+    scheduler.add_argument("--args", help="argumentos posicionais em JSON")
+    scheduler.add_argument("--kwargs", help="argumentos nomeados em JSON")
+    scheduler.add_argument("--queue", help="fila de destino")
+    scheduler.add_argument("--priority", type=int, help="prioridade")
+    scheduler.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="workers embutidos nesse processo (recomendado: o agendador segura a trava de escrita)",
+    )
+    scheduler.add_argument(
+        "--max-runtime", type=float, help="encerra após N segundos (útil em smoke tests)"
+    )
+
     monitor = subparsers.add_parser("monitor", help="visão ao vivo no terminal")
     monitor.add_argument("--once", action="store_true", help="imprime um quadro e sai")
     monitor.add_argument("--interval", type=float, help="segundos entre quadros")
@@ -544,6 +578,115 @@ async def _cmd_tasks(args: argparse.Namespace, ctx: Context) -> int:
             aligns=["l", "l", "r", "r", "l", "l"],
         )
     )
+    return EXIT_OK
+
+
+async def _cmd_cancel(args: argparse.Namespace, ctx: Context) -> int:
+    """``cancel``: cancela uma task que ainda está na fila."""
+    task = ctx.broker.get(args.id)
+    if task is None:
+        for candidate in ctx.broker.list_tasks(TaskFilter(limit=0)):
+            if candidate.id.startswith(args.id):
+                task = candidate
+                break
+    if task is None:
+        raise CliError(f"task não encontrada: {args.id}")
+    cancelada = await ctx.broker.cancel(task.id, reason=args.reason)
+    ctx.write(paint(f"task cancelada {cancelada.short_id}", _BOLD, ctx.color))
+    ctx.write(f"  nome    {cancelada.name}")
+    ctx.write(f"  fila    {cancelada.queue}")
+    if args.reason:
+        ctx.write(f"  motivo  {args.reason}")
+    return EXIT_OK
+
+
+async def _cmd_metrics(args: argparse.Namespace, ctx: Context) -> int:
+    """``metrics``: imprime as métricas do broker."""
+    ctx.broker.refresh()
+    if args.json:
+        ctx.write(json.dumps(ctx.broker.stats().to_dict(), ensure_ascii=False, indent=2))
+        return EXIT_OK
+    ctx.write(build_metrics_text(ctx.broker), )
+    return EXIT_OK
+
+
+async def _cmd_scheduler(args: argparse.Namespace, ctx: Context) -> int:
+    """``scheduler``: enfileira uma task periodicamente até ser interrompido."""
+    if bool(args.cron) == bool(args.interval):
+        raise CliError("informe exatamente um: --cron EXPRESSAO ou --interval SEGUNDOS")
+    positional = _parse_json(args.args, "args", default=[])
+    keywords = _parse_json(args.kwargs, "kwargs", default={})
+    if not isinstance(positional, list) or not isinstance(keywords, dict):
+        raise CliError("--args precisa ser uma lista e --kwargs um objeto JSON")
+
+    agendador = Scheduler(ctx.broker, ctx.config)
+    if args.cron:
+        schedule = agendador.add_task(
+            args.name, args.cron, *positional, **keywords, queue=args.queue, priority=args.priority
+        )
+    else:
+        schedule = agendador.add_interval(
+            args.name,
+            args.interval,
+            *positional,
+            **keywords,
+            queue=args.queue,
+            priority=args.priority,
+        )
+
+    pool = None
+    if args.workers > 0:
+        pool = WorkerPool(
+            ctx.broker,
+            ctx.registry,
+            ctx.config,
+            concurrency=args.workers,
+            worker_prefix="scheduler",
+        )
+
+    ctx.write(paint(f"{PROGRAM} scheduler", _BOLD, ctx.color))
+    ctx.write(f"  task       {schedule.name}")
+    ctx.write(f"  gatilho    {schedule.expression}")
+    ctx.write(f"  fila       {schedule.queue}")
+    ctx.write(f"  workers    {args.workers if pool else 'nenhum (só enfileira)'}")
+    if not pool:
+        ctx.write(
+            paint(
+                "  aviso      este processo segura a trava de escrita; "
+                "enfileirar de outro processo no mesmo data-dir vai falhar. "
+                "Use --workers N para consumir aqui dentro.",
+                _DIM,
+                ctx.color,
+            )
+        )
+    ctx.write(paint("  Ctrl+C para encerrar", _DIM, ctx.color))
+
+    if pool is not None:
+        await pool.start()
+    await agendador.start()
+    inicio = time.monotonic()
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            proximo = agendador.next_runs()
+            ctx.write(
+                paint(
+                    f"  {format_timestamp(time.time())}  disparos={schedule.run_count}  "
+                    f"proximo={format_timestamp(proximo[0]['next_run_at']) if proximo else '-'}",
+                    _DIM,
+                    ctx.color,
+                )
+            )
+            if args.max_runtime is not None and time.monotonic() - inicio >= args.max_runtime:
+                ctx.write(paint(f"  tempo máximo de {args.max_runtime}s atingido", _DIM, ctx.color))
+                break
+    except asyncio.CancelledError:
+        ctx.write(paint("  interrompido", _DIM, ctx.color))
+    finally:
+        await agendador.stop()
+        if pool is not None:
+            await pool.stop(drain=False, timeout=5.0)
+    ctx.write(f"resumo: {schedule.run_count} disparo(s), {schedule.error_count} erro(s)")
     return EXIT_OK
 
 
@@ -805,6 +948,9 @@ _HANDLERS = {
     "submit": (_cmd_submit, False),
     "status": (_cmd_status, True),
     "tasks": (_cmd_tasks, True),
+    "cancel": (_cmd_cancel, False),
+    "metrics": (_cmd_metrics, True),
+    "scheduler": (_cmd_scheduler, False),
     "monitor": (_cmd_monitor, True),
     "worker": (_cmd_worker, False),
     "dashboard": (_cmd_dashboard, False),

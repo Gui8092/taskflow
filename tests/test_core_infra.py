@@ -280,16 +280,24 @@ def test_transicoes_proibidas(origem: TaskState, destino: TaskState) -> None:
 
 def test_estados_terminais_e_rotulos() -> None:
     """Estados finais são reconhecidos e descritos em português."""
-    assert TERMINAL_STATES == {TaskState.SUCCESS, TaskState.FAILED, TaskState.DEAD}
+    assert TERMINAL_STATES == {
+        TaskState.SUCCESS,
+        TaskState.FAILED,
+        TaskState.DEAD,
+        TaskState.CANCELLED,
+    }
     assert is_terminal(TaskState.SUCCESS) is True
     assert is_terminal(TaskState.PENDING) is False
     assert is_terminal("dead") is True
 
     assert describe_state(TaskState.RUNNING) == "executando"
     assert describe_state(TaskState.DEAD) == "dead letter"
+    assert describe_state(TaskState.CANCELLED) == "cancelada"
     assert TaskState.SUCCESS.is_terminal is True
     assert TaskState.RETRY.is_pending is True
     assert TaskState.FAILED.is_failure is True
+    assert TaskState.CANCELLED.is_cancelled is True
+    assert TaskState.CANCELLED.is_failure is False
     assert str(TaskState.SUCCESS) == "SUCCESS"
 
 

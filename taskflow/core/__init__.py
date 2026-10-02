@@ -12,6 +12,12 @@ from taskflow.core.broker import (
 )
 from taskflow.core.config import Config, ConfigError, get_config, setup_logging, set_config
 from taskflow.core.events import Event, EventBus, EventType, Subscription
+from taskflow.core.metrics import (
+    METRICS_CONTENT_TYPE,
+    build_metrics,
+    build_metrics_text,
+    escape_label,
+)
 from taskflow.core.registry import (
     DuplicateTaskError,
     ModuleLoadError,
@@ -54,6 +60,7 @@ __all__ = [
     "FAILURE_STATES",
     "Lease",
     "ModuleLoadError",
+    "METRICS_CONTENT_TYPE",
     "PENDING_STATES",
     "QueueStats",
     "ReadOnlyBrokerError",
@@ -73,9 +80,12 @@ __all__ = [
     "UnknownTaskError",
     "VALID_TRANSITIONS",
     "build_registry",
+    "build_metrics",
+    "build_metrics_text",
     "can_transition",
     "describe_state",
     "dumps",
+    "escape_label",
     "get_config",
     "is_terminal",
     "loads",

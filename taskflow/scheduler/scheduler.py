@@ -35,12 +35,23 @@ class SchedulerError(RuntimeError):
     """Erro de configuração do agendador."""
 
 
+def format_seconds(value: float) -> str:
+    """Formata segundos de forma legível: ``45`` vira ``"45"``, ``0.05`` vira ``"0.05"``."""
+    return f"{float(value):g}"
+
+
 @dataclass(slots=True)
 class Schedule:
-    """Uma task periódica associada a uma expressão cron."""
+    """Uma task periódica, disparada por expressão cron **ou** por intervalo fixo.
+
+    Exatamente um dos dois modos precisa ser informado: ``cron`` (granularidade de
+    1 minuto, com a semântica do ``crontab``) ou ``interval`` em segundos, que
+    permite disparos mais frequentes que um minuto.
+    """
 
     name: str
-    cron: CronExpression
+    cron: CronExpression | None = None
+    interval: float | None = None
     args: list[Any] = field(default_factory=list)
     kwargs: dict[str, Any] = field(default_factory=dict)
     queue: str | None = None
@@ -53,16 +64,47 @@ class Schedule:
     run_count: int = 0
     error_count: int = 0
 
+    def __post_init__(self) -> None:
+        """Valida que exatamente um modo de disparo foi informado."""
+        if (self.cron is None) == (self.interval is None):
+            raise SchedulerError(
+                f"schedule {self.name!r}: informe exatamente um modo de disparo "
+                "(cron ou interval)"
+            )
+        if self.interval is not None and self.interval <= 0:
+            raise SchedulerError(
+                f"schedule {self.name!r}: interval precisa ser > 0 (recebido {self.interval})"
+            )
+
     @property
     def expression(self) -> str:
-        """A expressão cron como foi escrita na configuração."""
-        return self.cron.expression
+        """Descrição do gatilho, como escrito na configuração."""
+        if self.cron is not None:
+            return self.cron.expression
+        return f"a cada {format_seconds(self.interval or 0.0)}s"
+
+    def compute_next(self, now: float) -> float:
+        """Calcula o instante (epoch) da próxima execução a partir de *now*.
+
+        Para intervalo, o prazo é contado a partir da última execução — mas nunca
+        acumula atraso: se o processo ficou parado, o próximo disparo é ``now +
+        interval``, não uma rajada de execuções perdidas.
+        """
+        if self.cron is not None:
+            return self.cron.next_after(datetime.fromtimestamp(now)).timestamp()
+        base = self.last_run_at if self.last_run_at is not None else now
+        proximo = base + float(self.interval or 0.0)
+        if proximo <= now:
+            proximo = now + float(self.interval or 0.0)
+        return proximo
 
     def to_dict(self) -> dict[str, Any]:
         """Converte o schedule para um dicionário JSON-safe."""
         return {
             "name": self.name,
-            "cron": self.expression,
+            "cron": self.cron.expression if self.cron is not None else None,
+            "interval": self.interval,
+            "expression": self.expression,
             "queue": self.queue,
             "priority": self.priority,
             "next_run_at": self.next_run_at,
@@ -133,7 +175,7 @@ class Scheduler:
         max_retries: int | None = None,
         kwargs: Mapping[str, Any] | None = None,
     ) -> Schedule:
-        """Cria e registra um schedule para uma task.
+        """Cria e registra um schedule disparado por expressão cron.
 
         Args:
             task: :class:`RegisteredTask` ou nome lógico da task.
@@ -152,28 +194,81 @@ class Scheduler:
             UnknownTaskError: Se o nome não estiver registrado.
         """
         expression = cron if isinstance(cron, CronExpression) else CronExpression.parse(cron)
-        if isinstance(task, RegisteredTask):
-            name = task.name
-            queue = queue or task.queue
-            priority = task.priority if priority is None else priority
-            max_retries = task.max_retries if max_retries is None else max_retries
-        else:
-            registered = self.broker.registry.get(task)
-            name = registered.name
-            queue = queue or registered.queue
-            priority = registered.priority if priority is None else priority
-            max_retries = registered.max_retries if max_retries is None else max_retries
+        nome, fila, prioridade, retries = self._resolve_task(task, queue, priority, max_retries)
         schedule = Schedule(
-            name=name,
+            name=nome,
             cron=expression,
             args=list(args),
             kwargs=dict(kwargs or {}),
-            queue=queue,
-            priority=priority,
-            max_retries=max_retries,
+            queue=fila,
+            priority=prioridade,
+            max_retries=retries,
             tags={"scheduled": expression.expression},
         )
         return self.add(schedule)
+
+    def add_interval(
+        self,
+        task: RegisteredTask | str,
+        seconds: float,
+        *args: Any,
+        queue: str | None = None,
+        priority: int | None = None,
+        max_retries: int | None = None,
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> Schedule:
+        """Cria e registra um schedule disparado a cada *seconds*.
+
+        Resolve a limitação do cron, cuja granularidade mínima é de 1 minuto:
+        aqui é possível disparar a cada 5, 30 ou 90 segundos.
+
+        Args:
+            task: :class:`RegisteredTask` ou nome lógico da task.
+            seconds: Intervalo entre disparos, em segundos (tem de ser > 0).
+            *args: Argumentos fixos passados em cada disparo.
+            queue: Fila (padrão: a da task).
+            priority: Prioridade (padrão: a da task).
+            max_retries: Retries (padrão: o da task).
+            kwargs: Argumentos nomeados fixos.
+
+        Returns:
+            O :class:`Schedule` criado.
+
+        Raises:
+            SchedulerError: Se o intervalo for <= 0.
+            UnknownTaskError: Se o nome não estiver registrado.
+        """
+        nome, fila, prioridade, retries = self._resolve_task(task, queue, priority, max_retries)
+        schedule = Schedule(
+            name=nome,
+            interval=float(seconds),
+            args=list(args),
+            kwargs=dict(kwargs or {}),
+            queue=fila,
+            priority=prioridade,
+            max_retries=retries,
+            tags={"scheduled": f"every {format_seconds(seconds)}s"},
+        )
+        return self.add(schedule)
+
+    def _resolve_task(
+        self,
+        task: RegisteredTask | str,
+        queue: str | None,
+        priority: int | None,
+        max_retries: int | None,
+    ) -> tuple[str, str, int, int]:
+        """Normaliza task/fila/prioridade/retries a partir da task registrada."""
+        if isinstance(task, RegisteredTask):
+            registered = task
+        else:
+            registered = self.broker.registry.get(task)
+        return (
+            registered.name,
+            queue or registered.queue,
+            registered.priority if priority is None else priority,
+            registered.max_retries if max_retries is None else max_retries,
+        )
 
     def remove(self, name: str) -> bool:
         """Remove um schedule pelo nome da task."""
@@ -192,7 +287,7 @@ class Scheduler:
     def compute_next(self, schedule: Schedule, now: float | None = None) -> float:
         """Calcula o instante (epoch) da próxima execução de um schedule."""
         moment = self._clock() if now is None else now
-        return schedule.cron.next_after(datetime.fromtimestamp(moment)).timestamp()
+        return schedule.compute_next(moment)
 
     def due(self, now: float | None = None) -> list[Schedule]:
         """Devolve os schedules cujo horário já chegou (calculando o próximo se preciso)."""
@@ -332,8 +427,8 @@ def load_schedules(
 ) -> list[Schedule]:
     """Registra vários schedules a partir de dicionários de definição.
 
-    Cada dicionário aceita as chaves ``name``, ``cron``, ``args``, ``kwargs``,
-    ``queue``, ``priority`` e ``max_retries``.
+    Cada dicionário aceita as chaves ``name``, ``cron`` **ou** ``interval``,
+    ``args``, ``kwargs``, ``queue``, ``priority`` e ``max_retries``.
 
     Args:
         scheduler: Agendador destino.
@@ -343,26 +438,40 @@ def load_schedules(
         Os schedules criados.
 
     Raises:
-        KeyError: Se faltar ``name`` ou ``cron`` em alguma definição.
-        CronError: Se alguma expressão for inválida.
+        KeyError: Se faltar ``name`` em alguma definição.
+        CronError: Se alguma expressão cron for inválida.
+        SchedulerError: Se o intervalo for <= 0.
     """
     created: list[Schedule] = []
     for definition in definitions:
-        try:
-            name = definition["name"]
-            cron = definition["cron"]
-        except KeyError as exc:
-            raise KeyError(f"definição de schedule sem {exc.args[0]!r}: {definition!r}") from exc
-        expression = cron if isinstance(cron, CronExpression) else CronExpression.parse(str(cron))
-        schedule = Schedule(
-            name=str(name),
-            cron=expression,
-            args=list(definition.get("args") or []),
-            kwargs=dict(definition.get("kwargs") or {}),
-            queue=definition.get("queue"),
-            priority=definition.get("priority"),
-            max_retries=definition.get("max_retries"),
-            tags={"scheduled": expression.expression},
-        )
-        created.append(scheduler.add(schedule))
+            try:
+                name = definition["name"]
+                cron = definition.get("cron")
+                interval = definition.get("interval")
+            except KeyError as exc:
+                raise KeyError(f"definição de schedule sem {exc.args[0]!r}: {definition!r}") from exc
+            if interval is not None:
+                schedule = Schedule(
+                    name=str(name),
+                    interval=float(interval),
+                    args=list(definition.get("args") or []),
+                    kwargs=dict(definition.get("kwargs") or {}),
+                    queue=definition.get("queue"),
+                    priority=definition.get("priority"),
+                    max_retries=definition.get("max_retries"),
+                    tags={"scheduled": f"every {format_seconds(interval)}s"},
+                )
+            else:
+                expression = cron if isinstance(cron, CronExpression) else CronExpression.parse(str(cron))
+                schedule = Schedule(
+                    name=str(name),
+                    cron=expression,
+                    args=list(definition.get("args") or []),
+                    kwargs=dict(definition.get("kwargs") or {}),
+                    queue=definition.get("queue"),
+                    priority=definition.get("priority"),
+                    max_retries=definition.get("max_retries"),
+                    tags={"scheduled": expression.expression},
+                )
+            created.append(scheduler.add(schedule))
     return created
