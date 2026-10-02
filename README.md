@@ -350,3 +350,6 @@ python -m taskflow.cli status --queue demo
 ## Licença
 
 MIT — veja [LICENSE](LICENSE). Feito por **Guilherme H Schmitz**.
+
+Histórico de versões em [CHANGELOG.md](CHANGELOG.md); a primeira release está em
+[github.com/Gui8092/taskflow/releases/tag/v1.0.0](https://github.com/Gui8092/taskflow/releases/tag/v1.0.0).
