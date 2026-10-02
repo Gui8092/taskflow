@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Clonar o repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar sintaxe de todos os módulos
+        run: python -m compileall -q taskflow tests
+
+      - name: Suite de testes
+        run: python -m pytest -q
+
+      - name: Conferir que não há dependência proibida de broker
+        run: |
+          if grep -rniE "^[[:space:]]*(import|from)[[:space:]]+(celery|redis|rq|dramatiq|kombu|amqp|pika)\b" taskflow tests; then
+            echo "::error::import de dependência proibida encontrado"
+            exit 1
+          fi
+          echo "OK: nenhum import de Celery/Redis/RQ/Dramatiq"
+
+  smoke:
+    name: smoke da CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+
+      - name: Executar a CLI de ponta a ponta (submit, worker, status)
+        run: |
+          set -euo pipefail
+          python -m taskflow.cli --modules tests.demo_tasks tasks
+          python -m taskflow.cli --modules tests.demo_tasks submit demo.ok --args '["ci"]'
+          python -m taskflow.cli --modules tests.demo_tasks submit demo.flaky --args "[2]" --queue demo --max-retries 5
+          python -m taskflow.cli --modules tests.demo_tasks worker -c 2 --drain
+          python -m taskflow.cli status
+          python -m taskflow.cli cron next "*/5 * * * *" --count 2
+
+      - name: Conferir persistência após restart do processo
+        run: |
+          set -euo pipefail
+          python -m taskflow.cli --modules tests.demo_tasks submit demo.boom --queue demo --max-retries 0
+          python -m taskflow.cli --modules tests.demo_tasks worker -c 1 --queue demo --drain
+          python -m taskflow.cli dlq list
+          test -f .taskflow/journal.jsonl

@@ -65,9 +65,24 @@ dashboard web — tudo implementado do zero, sem Celery, Redis, RQ ou Dramatiq.
 
 ### Qualidade
 
-- 125 testes automatizados cobrindo broker, worker, retry/DLQ, cron, CLI e
-  persistência, todos passando.
+- 184 testes automatizados cobrindo broker, worker, retry/DLQ, cron, CLI,
+  persistência e a infraestrutura do núcleo (configuração, estados, event bus),
+  todos passando.
 - Logging estruturado com campos extras em formato `chave=valor`.
 - Type hints e docstrings em português em todas as funções e classes públicas.
+- Integração contínua no GitHub Actions: suíte em Python 3.11/3.12/3.13, checagem
+  de sintaxe, bloqueio de imports proibidos e um job *smoke* que exercita a CLI de
+  ponta a ponta em runner limpo.
+
+### Correções
+
+- **Configuração por variável de ambiente quebrada para valores não textuais:**
+  os conversores de `TASKFLOW_WORKER_CONCURRENCY`, `TASKFLOW_LEASE_SECONDS`,
+  `TASKFLOW_RETRY_BASE`, `TASKFLOW_QUEUES`, `TASKFLOW_DASHBOARD_PORT` e demais
+  campos numéricos/booleanos/listas recebiam a assinatura errada e levantavam
+  `TypeError`. Todos os conversores agora seguem a assinatura única
+  `(texto, nome_do_campo)` e cada variável é coberta por teste.
+- **`data_dir` em branco virava o diretório atual:** `Config(data_dir="   ")`
+  produzia `Path("")` → `.` e era aceito. Agora é recusado com `ConfigError`.
 
 [1.0.0]: https://github.com/Gui8092/taskflow/releases/tag/v1.0.0

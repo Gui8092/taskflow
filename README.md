@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Licença](https://img.shields.io/badge/licença-MIT-green)
-![Testes](https://img.shields.io/badge/testes-125%20passing-2ea043)
+![Testes](https://img.shields.io/badge/testes-184%20passing-2ea043)
 ![Dependências](https://img.shields.io/badge/dependências-fastapi·uvicorn·pytest-blueviolet)
 
 Fila de tarefas distribuída — um "mini-Celery" escrito do zero, em Python 3.11+,
@@ -22,7 +22,7 @@ taskflow/
 ├── taskflow/scheduler   parser de cron e loop de disparo periódico
 ├── taskflow/cli         submit · status · tasks · monitor · worker · dashboard · dlq · cron
 ├── taskflow/dashboard   FastAPI + WebSocket + página única com JS embutido
-└── tests                125 testes cobrindo broker, worker, retry/DLQ, cron, CLI e disco
+└── tests                184 testes cobrindo broker, worker, retry/DLQ, cron, CLI, disco e infraestrutura
 ```
 
 ## Instalação
@@ -268,7 +268,7 @@ async def main() -> None:
 ## Testes
 
 ```bash
-python -m pytest -q            # 125 testes
+python -m pytest -q            # 184 testes
 python -m pytest tests/test_retry_dlq.py -v
 ```
 
@@ -282,6 +282,17 @@ Cobertura por arquivo:
 | `test_scheduler.py` | 49 | 14 expressões válidas, 17 inválidas, `matches`, `next_after` com rollover, loop sem catch-up |
 | `test_cli.py` | 21 | submit, status, tasks, monitor, worker `--drain`, dlq, cron, HTML/snapshot do dashboard |
 | `test_persistence.py` | 11 | restart, resultado em disco, DLQ, task `RUNNING`, lease vencida, compaction, linha truncada, leitor concorrente |
+| `test_core_infra.py` | 59 | config via env e validação, transições de estado, event bus (assistente assíncrono, `wait_for`, histórico), renovação de lease, `fsync`, traceback no resultado |
+
+## Integração contínua
+
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em cada push e
+pull request na `main`:
+
+- **Job `testes`** — suíte completa em Python 3.11, 3.12 e 3.13, mais `compileall` e
+  uma verificação que falha se aparecer import de Celery/Redis/RQ/Dramatiq.
+- **Job `smoke`** — a CLI de verdade em um runner limpo: `tasks`, `submit`, `worker --drain`,
+  `status`, `cron next`, `dlq list` e conferência do journal em disco.
 
 ## Decisões de projeto (e por quê)
 
@@ -309,8 +320,10 @@ Cobertura por arquivo:
    não duplicar trabalho quando já existe um worker externo.
 10. **Arquivos fora da árvore pedida, e por quê:**
     `taskflow/cli/__main__.py` (necessário para `python -m taskflow.cli`, item 7 do
-    enunciado), `pytest.ini` (modo asyncio) , `tests/conftest.py` (fixtures
-    isoladas) e `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI).
+    enunciado), `pytest.ini` (modo asyncio), `tests/conftest.py` (fixtures
+    isoladas), `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI) e
+    `tests/test_core_infra.py` (configuração, estados e event bus, que os demais
+    arquivos de teste só exercitam de passagem).
 11. **O dashboard escreve CSS à mão**, em vez de reaproveitar classes utilitárias de
     um framework: a página precisa funcionar sem CDN e sem etapa de build.
 

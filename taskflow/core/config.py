@@ -84,7 +84,7 @@ def env_var(name: str) -> str:
     return f"{ENV_PREFIX}{name.upper()}"
 
 
-def _parse_bool(raw: str, *, name: str) -> bool:
+def _coerce_bool(raw: str, name: str) -> bool:
     """Converte texto em ``bool`` aceitando ``true/false``, ``1/0``, ``yes/no``, ``on/off``."""
     lowered = raw.strip().lower()
     if lowered in {"1", "true", "yes", "y", "on", "sim"}:
@@ -94,7 +94,7 @@ def _parse_bool(raw: str, *, name: str) -> bool:
     raise ConfigError(f"{env_var(name)} inválido: {raw!r} (esperado true ou false)")
 
 
-def _parse_int(raw: str, *, name: str) -> int:
+def _coerce_int(raw: str, name: str) -> int:
     """Converte texto em ``int``, falhando com mensagem explícita."""
     try:
         return int(raw.strip())
@@ -102,7 +102,7 @@ def _parse_int(raw: str, *, name: str) -> int:
         raise ConfigError(f"{env_var(name)} inválido: {raw!r} (esperado inteiro)") from exc
 
 
-def _parse_float(raw: str, *, name: str) -> float:
+def _coerce_float(raw: str, name: str) -> float:
     """Converte texto em ``float``, falhando com mensagem explícita."""
     try:
         return float(raw.strip())
@@ -110,53 +110,58 @@ def _parse_float(raw: str, *, name: str) -> float:
         raise ConfigError(f"{env_var(name)} inválido: {raw!r} (esperado número)") from exc
 
 
-def _parse_optional_float(raw: str, *, name: str) -> float | None:
+def _coerce_optional_float(raw: str, name: str) -> float | None:
     """Converte texto em ``float | None``; texto vazio ou ``none`` significam "sem timeout"."""
     cleaned = raw.strip()
     if not cleaned or cleaned.lower() in {"none", "null", "off"}:
         return None
-    return _parse_float(cleaned, name=name)
+    return _coerce_float(cleaned, name)
 
 
-def _parse_str_tuple(raw: str) -> tuple[str, ...]:
+def _coerce_tuple(raw: str, name: str) -> tuple[str, ...]:
     """Converte texto separado por vírgula em tupla, removendo espaços e vazios."""
-    parts = tuple(part.strip() for part in raw.split(",") if part.strip())
-    return parts
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _parse_path(raw: str) -> Path:
+def _coerce_path(raw: str, name: str) -> Path:
     """Converte texto em :class:`pathlib.Path` expandindo ``~``."""
     return Path(raw.strip()).expanduser()
 
 
-_COERCERS: Final[Mapping[str, Callable[[str], Any]]] = {
-    "data_dir": _parse_path,
-    "queues": _parse_str_tuple,
-    "default_queue": str,
-    "worker_concurrency": _parse_int,
-    "default_priority": _parse_int,
-    "default_max_retries": _parse_int,
-    "default_timeout": _parse_optional_float,
-    "lease_seconds": _parse_float,
-    "reclaim_interval": _parse_float,
-    "recover_running_on_start": _parse_bool,
-    "retry_base": _parse_float,
-    "retry_cap": _parse_float,
-    "retry_jitter": _parse_bool,
-    "journal_filename": str,
-    "snapshot_filename": str,
-    "lock_filename": str,
-    "lock_enabled": _parse_bool,
-    "compact_lines": _parse_int,
-    "ledger_limit": _parse_int,
-    "fsync": _parse_bool,
-    "dashboard_host": str,
-    "dashboard_port": _parse_int,
-    "dashboard_workers": _parse_int,
-    "modules": _parse_str_tuple,
-    "log_level": str,
-    "monitor_interval": _parse_float,
-    "monitor_rows": _parse_int,
+def _coerce_str(raw: str, name: str) -> str:
+    """Mantém o texto como está, removendo espaços nas pontas."""
+    return raw.strip()
+
+
+#: Conversores por campo. Todos têm a assinatura ``(texto, nome_do_campo) -> valor``.
+_COERCERS: Final[Mapping[str, Callable[[str, str], Any]]] = {
+    "data_dir": _coerce_path,
+    "queues": _coerce_tuple,
+    "default_queue": _coerce_str,
+    "worker_concurrency": _coerce_int,
+    "default_priority": _coerce_int,
+    "default_max_retries": _coerce_int,
+    "default_timeout": _coerce_optional_float,
+    "lease_seconds": _coerce_float,
+    "reclaim_interval": _coerce_float,
+    "recover_running_on_start": _coerce_bool,
+    "retry_base": _coerce_float,
+    "retry_cap": _coerce_float,
+    "retry_jitter": _coerce_bool,
+    "journal_filename": _coerce_str,
+    "snapshot_filename": _coerce_str,
+    "lock_filename": _coerce_str,
+    "lock_enabled": _coerce_bool,
+    "compact_lines": _coerce_int,
+    "ledger_limit": _coerce_int,
+    "fsync": _coerce_bool,
+    "dashboard_host": _coerce_str,
+    "dashboard_port": _coerce_int,
+    "dashboard_workers": _coerce_int,
+    "modules": _coerce_tuple,
+    "log_level": _coerce_str,
+    "monitor_interval": _coerce_float,
+    "monitor_rows": _coerce_int,
 }
 
 
@@ -198,7 +203,10 @@ class Config:
 
     def __post_init__(self) -> None:
         """Normaliza os campos recebidos como texto e valida as invariantes."""
-        object.__setattr__(self, "data_dir", Path(str(self.data_dir).strip()).expanduser())
+        bruto = str(self.data_dir)
+        if not bruto.strip():
+            raise ConfigError("data_dir não pode ser vazio")
+        object.__setattr__(self, "data_dir", Path(bruto.strip()).expanduser())
         object.__setattr__(self, "queues", tuple(self.queues))
         object.__setattr__(self, "modules", tuple(self.modules))
         self.validate()
@@ -230,7 +238,7 @@ class Config:
             if raw is None:
                 continue
             coercer = _COERCERS.get(name)
-            values[name] = coercer(raw) if coercer is not None else raw
+            values[name] = coercer(raw, name) if coercer is not None else raw
         for name, value in overrides.items():
             if name not in known:
                 raise ConfigError(f"opção de configuração desconhecida: {name!r}")
@@ -250,8 +258,6 @@ class Config:
 
     def validate(self) -> None:
         """Valida invariantes básicas, levantando :class:`ConfigError` quando necessário."""
-        if not str(self.data_dir):
-            raise ConfigError("data_dir não pode ser vazio")
         if self.worker_concurrency < 1:
             raise ConfigError(f"worker_concurrency deve ser >= 1 (recebido {self.worker_concurrency})")
         if self.default_max_retries < 0:
