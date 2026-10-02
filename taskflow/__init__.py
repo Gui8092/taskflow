@@ -35,7 +35,7 @@ from taskflow.worker.deadletter import DeadLetterQueue
 from taskflow.worker.pool import Worker, WorkerPool
 from taskflow.worker.retry import RetryPolicy
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Broker",

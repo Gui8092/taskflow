@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskflow"
+version = "1.1.0"
+description = "Fila de tarefas distribuída (mini-Celery) implementada do zero, sem Celery/Redis/RQ/Dramatiq"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Guilherme H Schmitz" }]
+keywords = ["task-queue", "distributed", "celery-alternative", "cron", "worker-pool"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Portuguese (Brazilian)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+
+# Em tempo de execução só entram o dashboard web e o servidor ASGI.
+# Broker, workers, cron, CLI e persistência usam apenas a biblioteca padrão.
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gui8092/taskflow"
+Source = "https://github.com/Gui8092/taskflow"
+Changelog = "https://github.com/Gui8092/taskflow/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Gui8092/taskflow/issues"
+
+# Atalho de console instalado junto com o pacote.
+# `python -m taskflow.cli ...` continua funcionando sem instalar nada.
+[project.scripts]
+taskflow = "taskflow.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["taskflow*"]
+exclude = ["tests*", "docs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"

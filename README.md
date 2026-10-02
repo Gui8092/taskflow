@@ -1,9 +1,10 @@
 # taskflow
 
+![CI](https://github.com/Gui8092/taskflow/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Licença](https://img.shields.io/badge/licença-MIT-green)
 ![Testes](https://img.shields.io/badge/testes-210%20passing-2ea043)
-![Dependências](https://img.shields.io/badge/dependências-fastapi·uvicorn·pytest-blueviolet)
+![Dependências](https://img.shields.io/badge/dependências-fastapi·uvicorn-blueviolet)
 
 Fila de tarefas distribuída — um "mini-Celery" escrito do zero, em Python 3.11+,
 **sem Celery, Redis, RQ ou Dramatiq**. O broker, a persistência, o event bus, o pool
@@ -17,24 +18,33 @@ estado, tentativas, prioridade, duração, fila e worker que a executou.</sub>
 
 ```
 taskflow/
-├── taskflow/core        broker, persistência, estados, registro, serialização, eventos
+├── taskflow/core        broker, persistência, estados, registro, serialização, eventos, métricas
 ├── taskflow/worker      pool assíncrono, política de retry, dead letter queue
-├── taskflow/scheduler   parser de cron e loop de disparo periódico
-├── taskflow/cli         submit · status · tasks · monitor · worker · dashboard · dlq · cron
+├── taskflow/scheduler   parser de cron e loop de disparo periódico (cron e intervalo)
+├── taskflow/cli         submit · status · tasks · cancel · metrics · scheduler · monitor · worker · dashboard · dlq · cron
 ├── taskflow/dashboard   FastAPI + WebSocket + página única com JS embutido
 └── tests                210 testes cobrindo broker, worker, retry/DLQ, cron, CLI, disco e infraestrutura
 ```
 
 ## Instalação
 
-Requer **Python 3.11+** (testado em 3.13) e só quatro dependências:
+Requer **Python 3.11+** (testado em 3.13).
 
 ```bash
+# Opção A: sem instalar nada, só as dependências
 python -m venv .venv
 # Windows:      .venv\Scripts\activate
 # Linux/macOS:  source .venv/bin/activate
 pip install -r requirements.txt
+
+# Opção B: pacote instalável, com o atalho de console `taskflow`
+pip install -e ".[dev]"
+taskflow --help
 ```
+
+A opção B instala o pacote em modo editável e cria o executável `taskflow`, que é
+o mesmo `main()` usado por `python -m taskflow.cli`. As duas formas funcionam; a
+primeira não altera nada no seu ambiente Python.
 
 ## Quickstart (60 segundos)
 
@@ -394,8 +404,9 @@ pull request na `main`:
    não duplicar trabalho quando já existe um worker externo.
 10. **Arquivos fora da árvore pedida, e por quê:**
     `taskflow/cli/__main__.py` (necessário para `python -m taskflow.cli`, item 7 do
-    enunciado), `pytest.ini` (modo asyncio), `tests/conftest.py` (fixtures
-    isoladas), `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI),
+    enunciado), `pyproject.toml` (metadados do pacote e config do pytest, para o
+    projeto ser instalável), `tests/conftest.py` (fixtures isoladas),
+    `tests/demo_tasks.py` (módulo de tasks usado nos testes da CLI),
     `tests/test_core_infra.py` (configuração, estados e event bus) e
     `tests/test_features.py` (cancelamento, métricas e agendamento por intervalo),
     que os arquivos originais de teste não cobriam.

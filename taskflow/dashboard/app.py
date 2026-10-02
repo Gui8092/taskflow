@@ -36,6 +36,7 @@ from typing import Any, AsyncIterator, Final
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from taskflow import __version__
 from taskflow.core.broker import (
     Broker,
     BrokerError,
@@ -219,7 +220,7 @@ def create_app(
     application = FastAPI(
         title="taskflow",
         description="Dashboard de uma fila de tarefas distribuída implementada do zero",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
     )
 

@@ -27,6 +27,13 @@ versionamento segue [SemVer](https://semver.org/lang/pt-BR/).
 - **Novos comandos de CLI:** `cancel`, `metrics` e `scheduler` (roda o agendador
   enfileirando tasks, com `--workers N` para consumir no mesmo processo).
 - **Novo endpoint `POST /api/tasks/{id}/cancel`** para a interface web.
+- **`pyproject.toml`**: o projeto passa a ser instalável (`pip install -e ".[dev]"`),
+  com metadados PEP 621, dependências de execução separadas das de desenvolvimento,
+  e o atalho de console `taskflow` (o mesmo `main()` de `python -m taskflow.cli`).
+  A configuração do pytest migrou do `pytest.ini` para
+  `[tool.pytest.ini_options]`, deixando o `pyproject.toml` como fonte única.
+- `taskflow.__version__` passa a ser lido do mesmo lugar que o dashboard expõe, e
+  alinhado com a tag da release (1.1.0).
 - Testes: `tests/test_features.py` (19 casos) e 7 casos novos em `test_cli.py`.
   Total de 210 testes, todos passando.
 
