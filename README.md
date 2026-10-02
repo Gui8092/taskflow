@@ -1,9 +1,19 @@
 # taskflow
 
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Licença](https://img.shields.io/badge/licença-MIT-green)
+![Testes](https://img.shields.io/badge/testes-125%20passing-2ea043)
+![Dependências](https://img.shields.io/badge/dependências-fastapi·uvicorn·pytest-blueviolet)
+
 Fila de tarefas distribuída — um "mini-Celery" escrito do zero, em Python 3.11+,
 **sem Celery, Redis, RQ ou Dramatiq**. O broker, a persistência, o event bus, o pool
 de workers, o agendador cron, a dead letter queue, a CLI e o dashboard são código
 deste repositório.
+
+![Dashboard do taskflow com workers embutidosprocessando tasks em três filas](docs/dashboard.png)
+
+<sub>Dashboard em execução: `python -m taskflow.cli dashboard --workers 3`. Cada linha é uma task —
+estado, tentativas, prioridade, duração, fila e worker que a executou.</sub>
 
 ```
 taskflow/
@@ -157,6 +167,13 @@ vira texto puro e determinístico — é assim que os testes verificam).
 Página única em `GET /`, com CSS e JS **embutidos** (sem CDN, sem build, funciona
 offline), conectada por `WS /ws` que envia um snapshot ao conectar e a cada
 evento, com coalescência (~4 msg/s).
+
+![Aba Dead letter com a task que esgotou os retries e o botão reenfileirar](docs/dashboard-dlq.png)
+
+<sub>Aba *Dead letter*: `demo.boom` esgotou os retries, guardou o erro e pode voltar à fila
+com um clique — que zera as tentativas e dá um orçamento novo.</sub>
+
+### Abas e recursos
 
 - Abas **Tasks**, **Dead letter** (com botão *reenfileirar*) e **Eventos** (ticker ao vivo)
 - Filtros por estado, fila e busca por nome/id; contadores por fila e por estado
@@ -329,3 +346,7 @@ python -m taskflow.cli status --queue demo
   limitado por configuração, não ilimitado.
 - Sem serialização de result sets em streaming: o retorno da task é serializado
   inteiro em JSON.
+
+## Licença
+
+MIT — veja [LICENSE](LICENSE). Feito por **Guilherme H Schmitz**.
